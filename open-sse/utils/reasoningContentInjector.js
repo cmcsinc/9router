@@ -6,7 +6,9 @@ const PLACEHOLDER = " ";
 
 // Provider-level rules: keyed by executor.provider
 const PROVIDER_RULES = {
-  deepseek: { scope: "all" }
+  deepseek: { scope: "all" },
+  "xiaomi-mimo": { scope: "all" },
+  "xiaomi-tokenplan": { scope: "all" }
 };
 
 // Model-level rules: matched by predicate against model id

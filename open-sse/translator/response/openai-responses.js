@@ -32,6 +32,7 @@ export function openaiToOpenAIResponsesResponse(chunk, state) {
   if (!state.started) {
     state.started = true;
     state.responseId = chunk.id ? `resp_${chunk.id}` : state.responseId;
+    if (chunk.model) state.model = chunk.model;
     
     emit("response.created", {
       type: "response.created",
@@ -320,19 +321,68 @@ function closeToolCall(state, emit, idx) {
   }
 }
 
+function buildOutputArray(state) {
+  const output = [];
+
+  // Reasoning item
+  if (state.reasoningId) {
+    output.push({
+      id: state.reasoningId,
+      type: "reasoning",
+      summary: state.reasoningBuf
+        ? [{ type: "summary_text", text: state.reasoningBuf }]
+        : []
+    });
+  }
+
+  // Message items
+  for (const idx in state.msgItemAdded) {
+    const msgId = `msg_${state.responseId}_${idx}`;
+    const text = state.msgTextBuf[idx] || "";
+    output.push({
+      id: msgId,
+      type: "message",
+      role: "assistant",
+      content: text
+        ? [{ type: "output_text", annotations: [], logprobs: [], text }]
+        : []
+    });
+  }
+
+  // Function call items
+  for (const idx in state.funcCallIds) {
+    const callId = state.funcCallIds[idx];
+    if (!callId) continue;
+    const args = state.funcArgsBuf[idx] || "{}" ;
+    output.push({
+      id: `fc_${callId}`,
+      type: "function_call",
+      call_id: callId,
+      name: state.funcNames[idx] || "",
+      arguments: args
+    });
+  }
+
+  return output;
+}
+
 function sendCompleted(state, emit) {
   if (!state.completedSent) {
     state.completedSent = true;
+    const response = {
+      id: state.responseId,
+      object: "response",
+      created_at: state.created,
+      status: "completed",
+      output: buildOutputArray(state),
+      background: false,
+      error: null
+    };
+    if (state.model) response.model = state.model;
+    if (state.usage) response.usage = state.usage;
     emit("response.completed", {
       type: "response.completed",
-      response: {
-        id: state.responseId,
-        object: "response",
-        created_at: state.created,
-        status: "completed",
-        background: false,
-        error: null
-      }
+      response
     });
   }
 }

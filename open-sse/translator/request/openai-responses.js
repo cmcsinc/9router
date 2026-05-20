@@ -6,7 +6,7 @@
  */
 import { register } from "../index.js";
 import { FORMATS } from "../formats.js";
-import { normalizeResponsesInput } from "../helpers/responsesApiHelper.js";
+import { normalizeResponsesInput, extractReasoningTextFromResponsesItem } from "../helpers/responsesApiHelper.js";
 
 // Responses API enforces max 64 chars on call_id (#393)
 const MAX_CALL_ID_LEN = 64;
@@ -29,6 +29,17 @@ export function openaiResponsesToOpenAIRequest(model, body, stream, credentials)
   // Group items by conversation turn
   let currentAssistantMsg = null;
   let pendingToolResults = [];
+  let pendingReasoningContent = "";
+
+  function attachPendingReasoning(targetMessage) {
+    if (!targetMessage || pendingReasoningContent.length === 0) return;
+    if (typeof targetMessage.reasoning_content === "string" && targetMessage.reasoning_content.length > 0) {
+      targetMessage.reasoning_content += pendingReasoningContent;
+    } else {
+      targetMessage.reasoning_content = pendingReasoningContent;
+    }
+    pendingReasoningContent = "";
+  }
 
   const inputItems = normalizeResponsesInput(body.input);
   if (!inputItems) return body;
@@ -41,6 +52,7 @@ export function openaiResponsesToOpenAIRequest(model, body, stream, credentials)
     if (itemType === "message") {
       // Flush any pending assistant message with tool calls
       if (currentAssistantMsg) {
+        attachPendingReasoning(currentAssistantMsg);
         result.messages.push(currentAssistantMsg);
         currentAssistantMsg = null;
       }
@@ -64,7 +76,11 @@ export function openaiResponsesToOpenAIRequest(model, body, stream, credentials)
           return c;
         })
         : item.content;
-      result.messages.push({ role: item.role, content });
+      const nextMessage = { role: item.role, content };
+      if (item.role === "assistant") {
+        attachPendingReasoning(nextMessage);
+      }
+      result.messages.push(nextMessage);
     }
     else if (itemType === "function_call") {
       // Start or append to assistant message with tool_calls
@@ -75,6 +91,7 @@ export function openaiResponsesToOpenAIRequest(model, body, stream, credentials)
           tool_calls: []
         };
       }
+      attachPendingReasoning(currentAssistantMsg);
       // Skip items with empty/missing name — Codex/OpenAI reject nameless tool calls (#444)
       if (!item.name || typeof item.name !== "string" || item.name.trim() === "") continue;
       currentAssistantMsg.tool_calls.push({
@@ -89,6 +106,7 @@ export function openaiResponsesToOpenAIRequest(model, body, stream, credentials)
     else if (itemType === "function_call_output") {
       // Flush assistant message first if exists
       if (currentAssistantMsg) {
+        attachPendingReasoning(currentAssistantMsg);
         result.messages.push(currentAssistantMsg);
         currentAssistantMsg = null;
       }
@@ -107,13 +125,24 @@ export function openaiResponsesToOpenAIRequest(model, body, stream, credentials)
       });
     }
     else if (itemType === "reasoning") {
-      // Skip reasoning items - they are for display only
+      const reasoningText = extractReasoningTextFromResponsesItem(item);
+      if (!reasoningText) continue;
+      if (currentAssistantMsg) {
+        if (typeof currentAssistantMsg.reasoning_content === "string") {
+          currentAssistantMsg.reasoning_content += reasoningText;
+        } else {
+          currentAssistantMsg.reasoning_content = reasoningText;
+        }
+      } else {
+        pendingReasoningContent += reasoningText;
+      }
       continue;
     }
   }
 
   // Flush remaining
   if (currentAssistantMsg) {
+    attachPendingReasoning(currentAssistantMsg);
     result.messages.push(currentAssistantMsg);
   }
   if (pendingToolResults.length > 0) {

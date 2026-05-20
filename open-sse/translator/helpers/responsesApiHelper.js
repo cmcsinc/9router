@@ -22,6 +22,51 @@ export function normalizeResponsesInput(input) {
 }
 
 /**
+ * Extract plain reasoning text from a Responses API `reasoning` item.
+ * Supports common shapes observed across clients/providers:
+ * - { type: "reasoning", text: "..." }
+ * - { type: "reasoning", summary: "..." }
+ * - { type: "reasoning", summary: [{ text: "..." }, ...] }
+ * - { type: "reasoning", content: [{ type: "summary_text", text: "..." }, ...] }
+ */
+export function extractReasoningTextFromResponsesItem(item) {
+  if (!item || item.type !== "reasoning") return "";
+
+  const parts = [];
+  const pushText = (value) => {
+    if (typeof value === "string" && value.length > 0) parts.push(value);
+  };
+
+  pushText(item.reasoning_content);
+  pushText(item.text);
+  pushText(item.summary);
+
+  if (Array.isArray(item.summary)) {
+    for (const entry of item.summary) {
+      if (typeof entry === "string") {
+        pushText(entry);
+      } else {
+        pushText(entry?.text);
+        pushText(entry?.content);
+      }
+    }
+  }
+
+  if (Array.isArray(item.content)) {
+    for (const entry of item.content) {
+      if (!entry || typeof entry !== "object") continue;
+      if (entry.type === "summary_text" || entry.type === "reasoning_text" || entry.type === "text" || entry.type === "output_text") {
+        pushText(entry.text);
+      } else {
+        pushText(entry.text);
+      }
+    }
+  }
+
+  return parts.join("");
+}
+
+/**
  * Convert OpenAI Responses API format to standard chat completions format
  * Responses API uses: { input: [...], instructions: "..." }
  * Chat API uses: { messages: [...] }
@@ -41,6 +86,17 @@ export function convertResponsesApiFormat(body) {
   let currentAssistantMsg = null;
   let pendingToolCalls = [];
   let pendingToolResults = [];
+  let pendingReasoningContent = "";
+
+  function attachPendingReasoning(targetMessage) {
+    if (!targetMessage || pendingReasoningContent.length === 0) return;
+    if (typeof targetMessage.reasoning_content === "string" && targetMessage.reasoning_content.length > 0) {
+      targetMessage.reasoning_content += pendingReasoningContent;
+    } else {
+      targetMessage.reasoning_content = pendingReasoningContent;
+    }
+    pendingReasoningContent = "";
+  }
 
   const inputItems = normalizeResponsesInput(body.input);
   if (!inputItems) return body;
@@ -53,6 +109,7 @@ export function convertResponsesApiFormat(body) {
     if (itemType === "message") {
       // Flush any pending assistant message with tool calls
       if (currentAssistantMsg) {
+        attachPendingReasoning(currentAssistantMsg);
         result.messages.push(currentAssistantMsg);
         currentAssistantMsg = null;
       }
@@ -76,7 +133,11 @@ export function convertResponsesApiFormat(body) {
           return c;
         })
         : item.content;
-      result.messages.push({ role: item.role, content });
+      const nextMessage = { role: item.role, content };
+      if (item.role === "assistant") {
+        attachPendingReasoning(nextMessage);
+      }
+      result.messages.push(nextMessage);
     }
     else if (itemType === "function_call") {
       // Start or append to assistant message with tool_calls
@@ -87,6 +148,7 @@ export function convertResponsesApiFormat(body) {
           tool_calls: []
         };
       }
+      attachPendingReasoning(currentAssistantMsg);
       // Skip items with empty/missing name — upstream APIs reject nameless tool calls (#444)
       if (!item.name || typeof item.name !== "string" || item.name.trim() === "") continue;
       currentAssistantMsg.tool_calls.push({
@@ -101,6 +163,7 @@ export function convertResponsesApiFormat(body) {
     else if (itemType === "function_call_output") {
       // Flush assistant message first if exists
       if (currentAssistantMsg) {
+        attachPendingReasoning(currentAssistantMsg);
         result.messages.push(currentAssistantMsg);
         currentAssistantMsg = null;
       }
@@ -112,13 +175,24 @@ export function convertResponsesApiFormat(body) {
       });
     }
     else if (itemType === "reasoning") {
-      // Skip reasoning items - they are for display only
+      const reasoningText = extractReasoningTextFromResponsesItem(item);
+      if (!reasoningText) continue;
+      if (currentAssistantMsg) {
+        if (typeof currentAssistantMsg.reasoning_content === "string") {
+          currentAssistantMsg.reasoning_content += reasoningText;
+        } else {
+          currentAssistantMsg.reasoning_content = reasoningText;
+        }
+      } else {
+        pendingReasoningContent += reasoningText;
+      }
       continue;
     }
   }
 
   // Flush remaining
   if (currentAssistantMsg) {
+    attachPendingReasoning(currentAssistantMsg);
     result.messages.push(currentAssistantMsg);
   }
   if (pendingToolResults.length > 0) {

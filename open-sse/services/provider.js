@@ -331,12 +331,13 @@ export function getTargetFormat(provider) {
   return config.format || "openai";
 }
 
-// Check if last message is from user
-export function isLastMessageFromUser(body) {
+// Last-message role that is valid for thinking/reasoning continuation
+export function isThinkingEligibleLastMessage(body) {
   const messages = body.messages || body.contents;
   if (!messages?.length) return true;
   const lastMsg = messages[messages.length - 1];
-  return lastMsg?.role === "user";
+  const role = lastMsg?.role;
+  return role === "user" || role === "tool" || role === "function";
 }
 
 // Check if request has thinking config
@@ -345,10 +346,10 @@ export function hasThinkingConfig(body) {
 }
 
 // Normalize thinking config based on last message role
-// - If lastMessage is not user → remove thinking config
-// - If lastMessage is user AND has thinking config → keep it (force enable)
+// - Keep thinking for user turns and tool/function continuation turns.
+// - Strip thinking for assistant/system/developer-ended turns.
 export function normalizeThinkingConfig(body) {
-  if (!isLastMessageFromUser(body)) {
+  if (!isThinkingEligibleLastMessage(body)) {
     delete body.reasoning_effort;
     delete body.thinking;
   }

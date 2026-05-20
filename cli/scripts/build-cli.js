@@ -137,10 +137,35 @@ console.log("3️⃣  Copying Next.js standalone build to app/cli/app...");
 const standaloneRoot = path.join(appDir, ".next", "standalone");
 const standaloneRootResolved = path.join(buildDistDir, "standalone");
 const standaloneRootToUse = fs.existsSync(standaloneRootResolved) ? standaloneRootResolved : standaloneRoot;
-const standaloneApp = fs.existsSync(path.join(standaloneRootToUse, "server.js"))
-  ? standaloneRootToUse
-  : path.join(standaloneRootToUse, "app");
-if (!fs.existsSync(standaloneApp)) {
+
+function resolveStandaloneApp(rootDir) {
+  const directServer = path.join(rootDir, "server.js");
+  if (fs.existsSync(directServer)) return rootDir;
+
+  const legacyAppDir = path.join(rootDir, "app");
+  if (fs.existsSync(path.join(legacyAppDir, "server.js")) || fs.existsSync(legacyAppDir)) {
+    return legacyAppDir;
+  }
+
+  // Next.js 16+ with workspace tracing can emit: standalone/<workspace-name>/server.js
+  // Detect this nested root shape and support both direct and legacy app/ variants.
+  if (fs.existsSync(rootDir)) {
+    const nestedDirs = fs.readdirSync(rootDir, { withFileTypes: true })
+      .filter(entry => entry.isDirectory())
+      .map(entry => path.join(rootDir, entry.name));
+
+    for (const nestedDir of nestedDirs) {
+      if (fs.existsSync(path.join(nestedDir, "server.js"))) return nestedDir;
+      const nestedAppDir = path.join(nestedDir, "app");
+      if (fs.existsSync(path.join(nestedAppDir, "server.js")) || fs.existsSync(nestedAppDir)) return nestedAppDir;
+    }
+  }
+
+  return null;
+}
+
+const standaloneApp = resolveStandaloneApp(standaloneRootToUse);
+if (!standaloneApp || !fs.existsSync(standaloneApp)) {
   console.error("❌ Next.js standalone build not found under .next/standalone");
   console.error("Expected either .next/standalone/server.js or .next/standalone/app/");
   process.exit(1);
