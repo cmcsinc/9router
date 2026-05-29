@@ -3,7 +3,7 @@ import path from "path";
 import https from "https";
 import os from "os";
 import { execSync, spawn } from "child_process";
-import { savePid, loadPid, clearPid } from "./state.js";
+import { savePid, loadPid, clearPid } from "./pid.js";
 import { DATA_DIR } from "@/lib/dataDir.js";
 
 const BIN_DIR = path.join(DATA_DIR, "bin");
@@ -185,6 +185,7 @@ async function _ensureCloudflared() {
 
 let cloudflaredProcess = null;
 let unexpectedExitHandler = null;
+let intentionalKill = false; // suppress unexpected-exit callback during deliberate kill
 
 /** Register a callback to be called when cloudflared exits unexpectedly after connecting */
 export function setUnexpectedExitHandler(handler) {
@@ -261,6 +262,7 @@ export async function spawnCloudflared(tunnelToken) {
         return;
       }
       // Watchdog (initializeApp) handles recovery — no auto-reconnect here
+      if (intentionalKill) { intentionalKill = false; return; }
       if (wasConnected && unexpectedExitHandler) unexpectedExitHandler();
     });
   });
@@ -289,7 +291,7 @@ export async function spawnQuickTunnel(localPort, onUrlUpdate) {
 
   const requestedProtocol = String(process.env.TUNNEL_TRANSPORT_PROTOCOL || process.env.CLOUDFLARED_PROTOCOL || DEFAULT_QUICK_TUNNEL_PROTOCOL).trim().toLowerCase();
   const tunnelProtocol = QUICK_TUNNEL_PROTOCOLS.has(requestedProtocol) ? requestedProtocol : DEFAULT_QUICK_TUNNEL_PROTOCOL;
-  const child = spawn(binaryPath, ["tunnel", "--url", `http://127.0.0.1:${localPort}`, "--config", configPath, "--no-autoupdate"], {
+  const child = spawn(binaryPath, ["tunnel", "--url", `http://127.0.0.1:${localPort}`, "--config", configPath, "--no-autoupdate", "--retries", "99"], {
     detached: false,
     windowsHide: true,
     cwd: os.tmpdir(),
@@ -305,6 +307,8 @@ export async function spawnQuickTunnel(localPort, onUrlUpdate) {
 
   return new Promise((resolve, reject) => {
     let resolved = false;
+    // Keep a small tail of raw cloudflared logs to surface real failure causes
+    let logTail = "";
 
     function getQuickTunnelUrlFromLog(message) {
       // cloudflared logs may contain "api.trycloudflare.com" as well,
@@ -326,13 +330,14 @@ export async function spawnQuickTunnel(localPort, onUrlUpdate) {
       if (resolved) return;
       resolved = true;
       cleanup();
-      reject(new Error("Quick tunnel timed out"));
+      reject(new Error(`Quick tunnel timed out. Last log: ${logTail.slice(-800) || "(empty)"}`));
     }, 90000);
 
     let lastUrl = null;
 
     const handleLog = (data) => {
       const msg = data.toString();
+      logTail = (logTail + msg).slice(-4000);
       const tunnelUrl = getQuickTunnelUrlFromLog(msg);
       if (!tunnelUrl) return;
 
@@ -369,18 +374,26 @@ export async function spawnQuickTunnel(localPort, onUrlUpdate) {
     child.on("exit", (code, signal) => {
       cloudflaredProcess = null;
       clearPid();
+      // Deliberate kill (restart/disable) — exit silently, no error noise
+      if (intentionalKill) {
+        intentionalKill = false;
+        clearTimeout(timeout);
+        cleanup();
+        if (!resolved) { resolved = true; reject(new Error("cloudflared killed")); }
+        return;
+      }
       console.log(`[Tunnel] cloudflared exit code=${code} signal=${signal}`);
       if (!resolved) {
         resolved = true;
         clearTimeout(timeout);
         cleanup();
-        // Provide more helpful error messages for common exit codes
+        const tail = logTail.slice(-600).trim() || "(empty)";
         if (code === 1) {
-          reject(new Error(`cloudflared exited with code ${code}. This often means: (1) the tunnel token is invalid or expired, (2) network connectivity issues, or (3) cloudflared cannot reach the local server.`));
+          reject(new Error(`cloudflared quick tunnel exited (code 1). Common causes: (1) outbound port 7844 (TCP/UDP) blocked, (2) TryCloudflare service issue, (3) cannot reach 127.0.0.1:${localPort}, (4) protocol (http2/quic) blocked by network. Last log: ${tail}`));
         } else if (code === 2) {
-          reject(new Error(`cloudflared exited with code ${code}. Check that arguments are correct.`));
+          reject(new Error(`cloudflared exited (code 2). Bad arguments. Last log: ${tail}`));
         } else {
-          reject(new Error(`cloudflared exited with code ${code}`));
+          reject(new Error(`cloudflared exited (code ${code}). Last log: ${tail}`));
         }
         return;
       }
@@ -405,6 +418,7 @@ function killCloudflaredByPort(port) {
 }
 
 export function killCloudflared(localPort) {
+  intentionalKill = true;
   if (cloudflaredProcess) {
     try {
       cloudflaredProcess.kill();
