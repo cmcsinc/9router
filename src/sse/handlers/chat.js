@@ -120,6 +120,41 @@ export async function handleChat(request, clientRawRequest = null) {
 async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null) {
   const modelInfo = await getModelInfo(modelStr);
 
+  // Auto-upgrade text-only MiMo models to mimo-v2-omni when image content is detected.
+  // This lets users keep "mimo-v2.5-pro" selected while still sending images.
+  const MIMO_IMAGE_MODEL = "mimo-v2-omni";
+  const MIMO_TEXT_ONLY_MODELS = new Set([
+    "mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-pro", "mimo-v2-flash",
+  ]);
+  function bodyHasImages(b) {
+    if (!b) return false;
+    // OpenAI Chat Completions: messages[].content[] with type "image_url" or "image"
+    if (Array.isArray(b.messages)) {
+      for (const msg of b.messages) {
+        if (!Array.isArray(msg.content)) continue;
+        for (const part of msg.content) {
+          if (part.type === "image_url" || part.type === "image") return true;
+        }
+      }
+    }
+    // OpenAI Responses API: input[] with type "input_image"
+    if (Array.isArray(b.input)) {
+      for (const item of b.input) {
+        if (item.type === "input_image") return true;
+        if (Array.isArray(item.content)) {
+          for (const part of item.content) {
+            if (part.type === "input_image") return true;
+          }
+        }
+      }
+    }
+    return false;
+  }
+  if (modelInfo.provider && MIMO_TEXT_ONLY_MODELS.has(modelInfo.model) && bodyHasImages(body)) {
+    log.info("ROUTING", `Auto-upgrading ${modelInfo.model} → ${MIMO_IMAGE_MODEL} (image content detected)`);
+    modelInfo.model = MIMO_IMAGE_MODEL;
+  }
+
   // If provider is null, this might be a combo name - check and handle
   if (!modelInfo.provider) {
     const comboModels = await getComboModels(modelStr);

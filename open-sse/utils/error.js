@@ -74,9 +74,15 @@ export async function parseUpstreamError(response, executor = null) {
     } catch { /* fall through to default parsing */ }
   }
 
+  // Strip SSE "data:" prefix(es) that some providers wrap error responses in
+  let jsonText = bodyText;
+  while (jsonText.startsWith('data:')) {
+    jsonText = jsonText.slice(5).trimStart();
+  }
+
   let message = "";
   try {
-    const json = JSON.parse(bodyText);
+    const json = JSON.parse(jsonText);
     message = json.error?.message || json.message || json.error || bodyText;
   } catch {
     message = bodyText;
