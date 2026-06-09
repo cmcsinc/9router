@@ -1,4 +1,4 @@
-// Some thinking-mode providers (DeepSeek, Kimi, ...) require reasoning_content
+// Some thinking-mode providers (DeepSeek, Kimi, MiniMax, ...) require reasoning_content
 // to be echoed back on assistant messages. Clients in OpenAI format don't send it,
 // so we inject a non-empty placeholder to satisfy upstream validation.
 
@@ -8,7 +8,9 @@ const PLACEHOLDER = " ";
 const PROVIDER_RULES = {
   deepseek: { scope: "all" },
   "xiaomi-mimo": { scope: "all" },
-  "xiaomi-tokenplan": { scope: "all" }
+  "xiaomi-tokenplan": { scope: "all" },
+  minimax: { scope: "all" },
+  "minimax-cn": { scope: "all" }
 };
 
 // Model-level rules: matched by predicate against model id
